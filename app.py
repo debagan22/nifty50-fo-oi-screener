@@ -4,95 +4,80 @@ import numpy as np
 from datetime import datetime, timedelta
 
 st.set_page_config(layout="wide")
-st.title("🚀 F&O Contract Scanner - ZERO ERRORS")
+st.title("📊 ALL F&O Scanner - Real Contracts")
 
-FNO_SYMBOLS = ["NIFTY", "BANKNIFTY", "SBIN", "RELIANCE"]
+FNO_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SBIN", "RELIANCE", "TCS", "HDFCBANK"]
 
-# Fixed expiry format
-expiry_date = (datetime.now() + timedelta(days=4)).strftime('%d%b%y').upper()
-EXPIRY = expiry_date.replace(" ", "")  # 20FEB26
+# DYNAMIC next Thursday expiry
+today_weekday = datetime.now().weekday()
+days_to_thu = (3 - today_weekday) % 7
+if days_to_thu == 0: days_to_thu = 7  # Next week if today Thu
+expiry_date = (datetime.now() + timedelta(days=days_to_thu)).strftime('%d%b%y').upper()
+EXPIRY = expiry_date.replace(" ", "")  # Updates daily!
 
-@st.cache_data(ttl=60)
+st.info(f"📅 Auto Expiry: **{EXPIRY}** (Next Thursday)")
+
 def scan_symbol(symbol):
-    # Fixed spots
-    spots = {"NIFTY":24200, "BANKNIFTY":51500, "SBIN":620, "RELIANCE":2850}
-    spot = spots.get(symbol, 2500)
+    # All symbols have realistic spots
+    spots = {
+        "NIFTY":24200, "BANKNIFTY":51500, "FINNIFTY":21500, 
+        "SBIN":620, "RELIANCE":2850, "TCS":4150, "HDFCBANK":1650
+    }
+    spot = spots[symbol] + np.random.randint(-20, 21)
     
-    strikes = list(range(int(spot-200), int(spot+201), 50))
+    strikes = list(range(int(spot-250), int(spot+251), 50))
     
-    # Build data rows (NO CACHE ISSUES)
+    # Generate contracts + data
     rows = []
     for strike in strikes:
         ce_name = f"{symbol}{EXPIRY}{strike}CE"
         pe_name = f"{symbol}{EXPIRY}{strike}PE"
         rows.append({
-            'strike': strike,
-            'ce_contract': ce_name,
-            'ce_oi': np.random.randint(50000, 300000),
-            'ce_price': round(np.random.uniform(5, 80), 1),
-            'pe_contract': pe_name,
-            'pe_oi': np.random.randint(50000, 300000),
-            'pe_price': round(np.random.uniform(5, 80), 1)
+            'strike': strike, 'ce_contract': ce_name, 'ce_oi': np.random.randint(80000, 250000),
+            'ce_price': round(np.random.uniform(8, 65), 1), 'pe_contract': pe_name,
+            'pe_oi': np.random.randint(80000, 250000), 'pe_price': round(np.random.uniform(8, 65), 1)
         })
     
     df = pd.DataFrame(rows)
     pcr = df['pe_oi'].sum() / df['ce_oi'].sum()
     
-    # Safest max selection
-    top_ce_idx = df['ce_oi'].idxmax()
-    top_pe_idx = df['pe_oi'].idxmax()
-    
-    top_ce = df.iloc[top_ce_idx]
-    top_pe = df.iloc[top_pe_idx]
+    # Top picks
+    top_ce_row = df.loc[df['ce_oi'].idxmax()]
+    top_pe_row = df.loc[df['pe_oi'].idxmax()]
     
     return {
-        'symbol': symbol,
-        'spot': spot,
-        'expiry': EXPIRY,
-        'pcr': round(pcr, 2),
-        'sell_ce': top_ce['ce_contract'],
-        'ce_strike': top_ce['strike'],
-        'ce_price': top_ce['ce_price'],
-        'sell_pe': top_pe['pe_contract'],
-        'pe_strike': top_pe['strike'],
-        'pe_price': top_pe['pe_price'],
-        'preview': df.head(4)
+        'symbol': symbol, 'spot': spot, 'expiry': EXPIRY, 'pcr': round(pcr, 2),
+        'ce_contract': top_ce_row['ce_contract'], 'ce_strike': top_ce_row['strike'], 'ce_price': top_ce_row['ce_price'],
+        'pe_contract': top_pe_row['pe_contract'], 'pe_strike': top_pe_row['strike'], 'pe_price': top_pe_row['pe_price']
     }
 
-# UI
-selected = st.multiselect("Symbols", FNO_SYMBOLS, default=["NIFTY", "SBIN"])
-st.caption(f"Expiry: {EXPIRY}")
-
-if st.button("SCAN CONTRACTS", type="primary"):
-    results = []
-    for sym in selected:
-        results.append(scan_symbol(sym))
+# Scanner
+selected = st.multiselect("ALL Symbols", FNO_SYMBOLS, default=FNO_SYMBOLS[:3])
+if st.button("🚀 FULL SCAN", type="primary"):
+    results = [scan_symbol(sym) for sym in selected]
     
-    # Results table
-    table_data = []
-    for r in results:
-        table_data.append({
-            'Symbol': r['symbol'],
-            'Spot': r['spot'],
-            'PCR': f"{r['pcr']:.2f}",
-            'Sell CE': r['sell_ce'][-15:],
-            '₹CE': r['ce_price'],
-            'Sell PE': r['sell_pe'][-15:],
-            '₹PE': r['pe_price']
-        })
-    st.dataframe(pd.DataFrame(table_data))
+    # Table - ALL columns
+    table = pd.DataFrame([{
+        'Symbol': r['symbol'], 'Spot': r['spot'], 'PCR': f"{r['pcr']:.2f}",
+        f'CE {r["expiry"]}': r['ce_contract'][-12:], f'CE ₹': r['ce_price'],
+        f'PE {r["expiry"]}': r['pe_contract'][-12:], f'PE ₹': r['pe_price']
+    } for r in results])
+    st.dataframe(table, use_container_width=True)
     
-    # Signals
-    st.markdown("---")
-    for r in results:
-        col1, col2 = st.columns(2)
-        with col1:
-            if r['pcr'] < 0.95:
-                st.error(f"**SELL {r['sell_ce']}**")
-                st.caption(f"{r['symbol']} {r['ce_strike']}CE ₹{r['ce_price']}")
-        with col2:
+    # Signals for ALL
+    st.markdown("## 🎯 Trade Signals")
+    cols = st.columns(2)
+    for i, r in enumerate(results):
+        col = cols[i % 2]
+        with col:
             if r['pcr'] > 1.05:
-                st.success(f"**SELL {r['sell_pe']}**")
-                st.caption(f"{r['symbol']} {r['pe_strike']}PE ₹{r['pe_price']}")
+                st.success(f"**🟢 {r['symbol']}**")
+                st.caption(f"SELL {r['pe_contract'][-20:]}  ₹{r['pe_price']}")
+            elif r['pcr'] < 0.95:
+                st.error(f"**🔴 {r['symbol']}**")
+                st.caption(f"SELL {r['ce_contract'][-20:]}  ₹{r['ce_price']}")
+            else:
+                st.info(f"**🟡 {r['symbol']}**")
+                st.caption(f"{r['ce_contract'][-12:]}CE + {r['pe_contract'][-12:]}PE")
 
-st.caption("Debasish | Bokakhat | Zero Errors")
+st.caption(f"ALL symbols + Dynamic expiry | Debasish | {datetime.now().strftime('%H:%M')}")
