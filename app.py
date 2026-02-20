@@ -5,16 +5,12 @@ import numpy as np
 from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Live F&O Scanner")
-st.title("⚡ LIVE Nifty F&O Signals")
+st.title("🔥 LIVE Nifty F&O OI Scanner")
 
 @st.cache_data(ttl=300)
-def get_live_fo(symbol):
-    """Live yfinance NSE data + OI logic"""
+def get_live_data(symbol):
     ticker = yf.Ticker(symbol)
-    
-    # Live spot + options
     spot = ticker.fast_info['lastPrice']
+    
     try:
-        chain = ticker.option_chain(ticker.options[0])
-        calls = chain.calls.copy()
-        puts
+        chain = ticker.option_chain(ticker.options
