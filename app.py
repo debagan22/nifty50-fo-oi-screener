@@ -1,83 +1,88 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import requests
+from io import StringIO
 from datetime import datetime, timedelta
 
 st.set_page_config(layout="wide")
-st.title("📊 ALL F&O Scanner - Real Contracts")
+st.title("🔥 NSE EOD F&O Scanner - Real Data")
 
-FNO_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SBIN", "RELIANCE", "TCS", "HDFCBANK"]
+FNO_SYMBOLS = ["NIFTY", "BANKNIFTY", "SBIN", "RELIANCE", "HDFCBANK"]
 
-# DYNAMIC next Thursday expiry
-today_weekday = datetime.now().weekday()
-days_to_thu = (3 - today_weekday) % 7
-if days_to_thu == 0: days_to_thu = 7  # Next week if today Thu
-expiry_date = (datetime.now() + timedelta(days=days_to_thu)).strftime('%d%b%y').upper()
-EXPIRY = expiry_date.replace(" ", "")  # Updates daily!
+@st.cache_data(ttl=3600)
+def get_nse_eod_fo():
+    """NSE REAL EOD F&O bhavcopy - all contracts"""
+    yesterday = (datetime.now() - timedelta(1)).strftime('%d%b%Y').upper()
+    urls = [
+        "https://www.nseindia.com/content/fo/fo_underlying.csv",  # F&O summary
+        "https://www.nseindia.com/content/fo/fo_mktlots.csv"      # Lots/OI
+    ]
+    
+    all_data = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
+    
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                df = pd.read_csv(StringIO(resp.text))
+                all_data.append(df)
+        except:
+            pass
+    
+    if all_data:
+        combined = pd.concat(all_data, ignore_index=True)
+        return combined[combined['SYMBOL'].str.contains('|'.join(FNO_SYMBOLS), na=False)]
+    
+    st.error("❌ EOD fetch failed - try after 6PM IST")
+    return pd.DataFrame()
 
-st.info(f"📅 Auto Expiry: **{EXPIRY}** (Next Thursday)")
-
-def scan_symbol(symbol):
-    # All symbols have realistic spots
-    spots = {
-        "NIFTY":24200, "BANKNIFTY":51500, "FINNIFTY":21500, 
-        "SBIN":620, "RELIANCE":2850, "TCS":4150, "HDFCBANK":1650
-    }
-    spot = spots[symbol] + np.random.randint(-20, 21)
+@st.cache_data(ttl=3600)
+def get_symbol_contracts(symbol):
+    """Parse real contracts from EOD"""
+    df = get_nse_eod_fo()
+    if df.empty:
+        return "No EOD data"
     
-    strikes = list(range(int(spot-250), int(spot+251), 50))
+    sym_data = df[df['SYMBOL'].str.contains(symbol, na=False)]
+    if sym_data.empty:
+        return f"No {symbol} contracts"
     
-    # Generate contracts + data
-    rows = []
-    for strike in strikes:
-        ce_name = f"{symbol}{EXPIRY}{strike}CE"
-        pe_name = f"{symbol}{EXPIRY}{strike}PE"
-        rows.append({
-            'strike': strike, 'ce_contract': ce_name, 'ce_oi': np.random.randint(80000, 250000),
-            'ce_price': round(np.random.uniform(8, 65), 1), 'pe_contract': pe_name,
-            'pe_oi': np.random.randint(80000, 250000), 'pe_price': round(np.random.uniform(8, 65), 1)
-        })
-    
-    df = pd.DataFrame(rows)
-    pcr = df['pe_oi'].sum() / df['ce_oi'].sum()
-    
-    # Top picks
-    top_ce_row = df.loc[df['ce_oi'].idxmax()]
-    top_pe_row = df.loc[df['pe_oi'].idxmax()]
+    # Extract top OI contracts
+    sym_data['OI_INT'] = pd.to_numeric(sym_data['OI'], errors='coerce').fillna(0)
+    top_contracts = sym_data.nlargest(3, 'OI_INT')
     
     return {
-        'symbol': symbol, 'spot': spot, 'expiry': EXPIRY, 'pcr': round(pcr, 2),
-        'ce_contract': top_ce_row['ce_contract'], 'ce_strike': top_ce_row['strike'], 'ce_price': top_ce_row['ce_price'],
-        'pe_contract': top_pe_row['pe_contract'], 'pe_strike': top_pe_row['strike'], 'pe_price': top_pe_row['pe_price']
+        'symbol': symbol,
+        'contracts': len(sym_data),
+        'top_oi': top_contracts[['SYMBOL', 'OI', 'CLOSE']].to_dict('records'),
+        'latest': top_contracts.iloc[0]['TIMESTAMP'] if 'TIMESTAMP' in top_contracts else 'Today'
     }
 
-# Scanner
-selected = st.multiselect("ALL Symbols", FNO_SYMBOLS, default=FNO_SYMBOLS[:3])
-if st.button("🚀 FULL SCAN", type="primary"):
-    results = [scan_symbol(sym) for sym in selected]
-    
-    # Table - ALL columns
-    table = pd.DataFrame([{
-        'Symbol': r['symbol'], 'Spot': r['spot'], 'PCR': f"{r['pcr']:.2f}",
-        f'CE {r["expiry"]}': r['ce_contract'][-12:], f'CE ₹': r['ce_price'],
-        f'PE {r["expiry"]}': r['pe_contract'][-12:], f'PE ₹': r['pe_price']
-    } for r in results])
-    st.dataframe(table, use_container_width=True)
-    
-    # Signals for ALL
-    st.markdown("## 🎯 Trade Signals")
-    cols = st.columns(2)
-    for i, r in enumerate(results):
-        col = cols[i % 2]
-        with col:
-            if r['pcr'] > 1.05:
-                st.success(f"**🟢 {r['symbol']}**")
-                st.caption(f"SELL {r['pe_contract'][-20:]}  ₹{r['pe_price']}")
-            elif r['pcr'] < 0.95:
-                st.error(f"**🔴 {r['symbol']}**")
-                st.caption(f"SELL {r['ce_contract'][-20:]}  ₹{r['ce_price']}")
-            else:
-                st.info(f"**🟡 {r['symbol']}**")
-                st.caption(f"{r['ce_contract'][-12:]}CE + {r['pe_contract'][-12:]}PE")
+# MAIN APP
+st.subheader("📥 NSE EOD Data")
+eod_df = get_nse_eod_fo()
+if not eod_df.empty:
+    st.success(f"✅ Loaded **{len(eod_df)}** real EOD contracts")
+    st.dataframe(eod_df[['SYMBOL', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'OI']].head(20), use_container_width=True)
+else:
+    st.info("⏳ EOD available ~6PM IST - Market open now")
 
-st.caption(f"ALL symbols + Dynamic expiry | Debasish | {datetime.now().strftime('%H:%M')}")
+st.subheader("🎯 Top Signals")
+selected = st.multiselect("Symbols", FNO_SYMBOLS, default=FNO_SYMBOLS)
+if st.button("📊 ANALYZE EOD", type="primary"):
+    signals = []
+    for sym in selected:
+        result = get_symbol_contracts(sym)
+        if isinstance(result, dict):
+            signals.append(result)
+    
+    if signals:
+        for sig in signals:
+            with st.expander(f"{sig['symbol']} ({sig['contracts']} contracts)"):
+                st.write("**Top OI Contracts:**")
+                for contract in sig['top_oi']:
+                    st.markdown(f"**{contract['SYMBOL']}** | ₹{contract['CLOSE']} | OI {contract['OI']:,}")
+                st.caption(f"Data: {sig['latest']}")
+
+st.caption("Debasish Ganguly | NSE EOD Real Data | Updated 12:20 PM IST")
