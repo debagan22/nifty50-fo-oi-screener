@@ -1,82 +1,95 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
-from nsepython import fnolist  # Correct function for F&O list
-from datetime import datetime
-
-@st.cache_data(ttl=300)
-def get_nifty_fo_stocks():
-    all_fo = fnolist()  # All F&O stocks
-    nifty50_fo = [s for s in all_fo if s in ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'HINDUNILVR']]  # Sample Nifty50 F&O; expand as needed
-    return nifty50_fo[:20]  # Limit demo
-
-def fetch_nse_optionchain(symbol):
-    """Direct NSE API for option chain (reliable alternative)"""
-    try:
-        url = "https://www.nseindia.com/api/option-chain-indices?symbol=" + symbol
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers)
-        return response.json()
-    except:
-        return None
+import numpy as np
+from io import StringIO
+import json
 
 st.title("Nifty 50 F&O OI Screener with Buy/Sell Suggestions")
 
-fo_stocks = get_nifty_fo_stocks()
-selected_symbol = st.selectbox("Select Nifty50 F&O Stock", fo_stocks)
+@st.cache_data(ttl=600)
+def get_nifty50_symbols():
+    """Fetch official Nifty 50 list from NSE"""
+    url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    session.get('https://www.nseindia.com', headers=headers)  # Warmup cookies
+    resp = session.get(url, headers=headers)
+    df = pd.read_csv(StringIO(resp.text))
+    return df['Symbol'].tolist()
 
-if selected_symbol and st.button("Analyze & Suggest Trades"):
-    with st.spinner("Fetching live data..."):
-        chain_data = fetch_nse_optionchain(selected_symbol)
+@st.cache_data(ttl=300)
+def fetch_option_chain(symbol):
+    """NSE Option Chain API"""
+    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9'
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    session.get('https://www.nseindia.com')
+    resp = session.get(url, headers=headers)
+    if resp.status_code == 200:
+        return resp.json()
+    return None
+
+nifty_symbols = get_nifty50_symbols()
+fo_symbols = ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'HINDUNILVR']  # Common Nifty F&O subset
+selected_symbol = st.selectbox("Select Nifty F&O Stock/Index", ['NIFTY'] + fo_symbols)
+
+if st.button("Analyze Option Chain & Get Suggestions"):
+    chain = fetch_option_chain(selected_symbol)
+    if chain and 'records' in chain and 'data' in chain['records']:
+        df = pd.DataFrame(chain['records']['data'])
         
-        if chain_data and 'records' in chain_data:
-            records = chain_data['records']['data']
-            df = pd.DataFrame(records)
-            
-            # Nearest expiry
-            expiry = df['expiryDate'].iloc[0]
-            nearest = df[df['expiryDate'] == expiry]
-            
-            # CE/PE aggregates
-            ce_oi = nearest['CE']['openInterest'].sum()
-            pe_oi = nearest['PE']['openInterest'].sum()
-            pcr = pe_oi / ce_oi if ce_oi > 0 else 0
-            
-            # Max OI strikes
-            max_ce_idx = nearest['CE']['openInterest'].idxmax()
-            max_pe_idx = nearest['PE']['openInterest'].idxmax()
-            max_ce_strike = nearest.loc[max_ce_idx, 'strikePrice']
-            max_pe_strike = nearest.loc[max_pe_idx, 'strikePrice']
-            
-            ltp_ce = nearest['CE']['lastPrice'].mean()
-            ltp_pe = nearest['PE']['lastPrice'].mean()
-            
-            st.subheader("Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("PCR", f"{pcr:.2f}")
-            col2.metric("Resistance (Max CE OI)", max_ce_strike)
-            col3.metric("Support (Max PE OI)", max_pe_strike)
-            
-            # Chain table (top 10)
-            chain_top = nearest.head(10)[['strikePrice', 'CE', 'PE']]
-            chain_top['CE_OI'] = chain_top['CE'].apply(lambda x: x.get('openInterest', 0))
-            chain_top['PE_OI'] = chain_top['PE'].apply(lambda x: x.get('openInterest', 0))
-            chain_top['CE_LTP'] = chain_top['CE'].apply(lambda x: x.get('lastPrice', 0))
-            chain_top['PE_LTP'] = chain_top['PE'].apply(lambda x: x.get('lastPrice', 0))
-            st.dataframe(chain_top[['strikePrice', 'CE_OI', 'PE_OI', 'CE_LTP', 'PE_LTP']])
-            
-            # Suggestions
-            st.subheader("Trade Suggestions")
-            if pcr > 1.2:
-                st.success("**Bullish**: Sell Put @ " + str(max_pe_strike) + " (LTP ₹" + f"{nearest['PE']['lastPrice'][nearest['strikePrice']==max_pe_strike].iloc[0]:.2f}" + "), Buy Call ATM (₹" + f"{ltp_ce:.2f}" + ")")
-            elif pcr < 0.8:
-                st.error("**Bearish**: Sell Call @ " + str(max_ce_strike) + " (LTP ₹" + f"{nearest['CE']['lastPrice'][nearest['strikePrice']==max_ce_strike].iloc[0]:.2f}" + "), Buy Put ATM (₹" + f"{ltp_pe:.2f}" + ")")
-            else:
-                st.info("**Neutral**: Sell Straddle @ " + str(max_ce_strike) + "/ " + str(max_pe_strike) + " (Call ₹" + f"{nearest['CE']['lastPrice'][nearest['strikePrice']==max_ce_strike].iloc[0]:.2f}" + ", Put ₹" + f"{nearest['PE']['lastPrice'][nearest['strikePrice']==max_pe_strike].iloc[0]:.2f}" + ")")
-            
-            st.warning("Educational. Market hours only. Not advice.")
+        # Nearest expiry
+        expiry = df['expiryDate'].value_counts().idxmax()
+        nearest_df = df[df['expiryDate'] == expiry].copy()
+        
+        # PCR & Max OI
+        ce_oi_total = nearest_df['CE'].apply(lambda x: x.get('openInterest', 0) if isinstance(x, dict) else 0).sum()
+        pe_oi_total = nearest_df['PE'].apply(lambda x: x.get('openInterest', 0) if isinstance(x, dict) else 0).sum()
+        pcr = pe_oi_total / ce_oi_total if ce_oi_total > 0 else 0
+        
+        ce_oi_max_idx = nearest_df['CE'].apply(lambda x: x.get('openInterest', 0) if isinstance(x, dict) else 0).idxmax()
+        pe_oi_max_idx = nearest_df['PE'].apply(lambda x: x.get('openInterest', 0) if isinstance(x, dict) else 0).idxmax()
+        resistance = nearest_df.loc[ce_oi_max_idx, 'strikePrice']
+        support = nearest_df.loc[pe_oi_max_idx, 'strikePrice']
+        
+        ce_ltp_max = nearest_df.loc[ce_oi_max_idx, 'CE']['lastPrice']
+        pe_ltp_max = nearest_df.loc[pe_oi_max_idx, 'PE']['lastPrice']
+        
+        # Display
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("PCR (OI)", f"{pcr:.2f}")
+        col2.metric("Resistance", resistance)
+        col3.metric("Support", support)
+        col4.metric("Underlying LTP", f"₹{chain.get('underlyingValue', 0):.2f}")
+        
+        # Top chain
+        top_df = nearest_df.head(10)[['strikePrice']]
+        top_df['CE OI'] = nearest_df['CE'].head(10).apply(lambda x: x.get('openInterest', 0))
+        top_df['PE OI'] = nearest_df['PE'].head(10).apply(lambda x: x.get('openInterest', 0))
+        top_df['CE LTP'] = nearest_df['CE'].head(10).apply(lambda x: x.get('lastPrice', 0))
+        top_df['PE LTP'] = nearest_df['PE'].head(10).apply(lambda x: x.get('lastPrice', 0))
+        st.dataframe(top_df.round(0))
+        
+        # Suggestions
+        st.subheader("Trade Suggestions (Educational)")
+        if pcr > 1.2:
+            st.success(f"**Bullish (PCR {pcr:.2f})**: Expect upside to {resistance}.\n- **Sell Put** {support} strike @ ₹{pe_ltp_max:.2f} (max OI support)\n- **Buy Call** near {chain.get('underlyingValue', 0):.0f} @ avg ₹{nearest_df['CE']['lastPrice'].apply(lambda x: x.get('lastPrice', 0)).mean():.2f}")
+        elif pcr < 0.8:
+            st.error(f"**Bearish (PCR {pcr:.2f})**: Downside to {support}.\n- **Sell Call** {resistance} strike @ ₹{ce_ltp_max:.2f} (max OI resistance)\n- **Buy Put** near {chain.get('underlyingValue', 0):.0f} @ avg ₹{nearest_df['PE']['lastPrice'].apply(lambda x: x.get('lastPrice', 0)).mean():.2f}")
         else:
-            st.error("No data. Try 'NIFTY' or check connection.")
+            st.info(f"**Sideways (PCR {pcr:.2f})**: Range {support}-{resistance}.\n**Iron Condor**: Sell Call {resistance} @ ₹{ce_ltp_max:.2f}, Sell Put {support} @ ₹{pe_ltp_max:.2f}")
+        
+        st.warning("**Risk Disclaimer**: Simulations only. Use stop-loss. Market data live 9:15-15:30 IST. Not advice.")
+    else:
+        st.error("Failed to fetch data. Try 'NIFTY' during market hours or check internet.")
 
-st.caption("Fixed import & NSE direct fetch. Works 2026.") [web:31][web:30]
+st.caption(f"Updated {datetime.now().strftime('%Y-%m-%d')}. NSE direct API.")[web:36][web:30][web:37]
